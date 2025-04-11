@@ -1,0 +1,10 @@
+# Ignore .qodo folder
+.qodo/
+
+# Ignore node_modules
+node_modules/
+
+# Ignore environment variable files
+.env
+
+credentials.json
