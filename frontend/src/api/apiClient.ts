@@ -20,29 +20,26 @@ api.interceptors.request.use(config => {
   return config;
 });
 
-// Google Drive Files
-export const listDriveFiles = (accessToken?: string) => {
-  const headers = accessToken ? { 'X-Google-Token': accessToken } : {};
-  return api.get('/googledrive/files', { headers });
-};
+// Authentication
+export const getGoogleAuthUrl = () => api.get('/auth/url');
 
-export const processFile = (fileId: string, accessToken?: string) => {
-  const headers = accessToken ? { 'X-Google-Token': accessToken } : {};
-  return api.get(`/googledrive/process/${fileId}`, { headers });
-};
+// Google Drive Files (no need to pass access token now, backend will handle it)
+export const listDriveFiles = () => api.get('/googledrive/files');
+export const processFile = (fileId: string) => api.get(`/googledrive/process/${fileId}`);
+// export const scanDocuments = (googleToken?: string) => {
+//   const headers = googleToken ? { 'Google-Auth': googleToken } : {};
+//   return api.post('/googledrive/scan', {}, { headers });
+// }
 
-export const scanDocuments = (accessToken?: string) => {
-  const headers = accessToken ? { 'X-Google-Token': accessToken } : {};
-  return api.post('/googledrive/scan', {}, { headers });
-};
+export const scanDocuments = () => api.post('/googledrive/scan');
 
 // Assets
 export const getDetectedAssets = () => api.get('/assets/detected');
 export const getStaticAssets = () => api.get('/assets/static');
-export const getMissingAssets = () => api.get('/assets');
-export const saveMissingAsset = (assetData: any, accessToken?: string) => {
-  const headers = accessToken ? { 'X-Google-Token': accessToken } : {};
-  return api.post('/assets/add-missing', assetData, { headers });
+export const getMissingAssets = () => api.get('/assets/missing');
+export const saveMissingAsset = (assetData: any, googleToken?: string) => {
+  const config = googleToken ? { headers: { 'Google-Auth': googleToken } } : undefined;
+  return api.post('/assets/add-missing', assetData, config);
 };
 
 export default api;

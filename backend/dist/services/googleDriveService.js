@@ -1,37 +1,3 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -41,45 +7,42 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.findMissingAssets = exports.processFile = exports.listFiles = void 0;
-const fs_1 = __importDefault(require("fs"));
-const path_1 = __importDefault(require("path"));
-const googleapis_1 = require("googleapis");
-const vision_1 = __importDefault(require("@google-cloud/vision"));
-const documentProcessor = __importStar(require("./documentProcessor"));
-const assetSchema_1 = require("../models/assetSchema");
-const storage_1 = require("@google-cloud/storage");
-const uuid_1 = require("uuid");
-const BUCKET_NAME = 'vealthx-ocr-bucket';
+import fs from 'fs';
+import path from 'path';
+import { google } from 'googleapis';
+import vision from '@google-cloud/vision';
+import * as documentProcessor from './documentProcessor.js';
+import { Asset } from '../models/assetSchema.js';
+import { Storage } from '@google-cloud/storage';
+import { v4 as uuidv4 } from 'uuid';
+import dotenv from "dotenv";
+dotenv.config();
+const BUCKET_NAME = process.env.GOOGLE_BUCKET;
+console.log("bucket name: ", BUCKET_NAME);
 // Configure Google Drive API
 const authenticateGoogleDrive = (accessToken) => {
-    // If an access token is provided (from OAuth flow), use it
     if (accessToken) {
-        const auth = new googleapis_1.google.auth.OAuth2();
+        const auth = new google.auth.OAuth2();
         auth.setCredentials({ access_token: accessToken });
-        return googleapis_1.google.drive({ version: 'v3', auth });
+        return google.drive({ version: 'v3', auth });
     }
     // Otherwise, fall back to service account
-    const auth = new googleapis_1.google.auth.GoogleAuth({
-        keyFile: path_1.default.resolve(process.cwd(), 'credentials.json'),
+    const auth = new google.auth.GoogleAuth({
+        keyFile: path.resolve(process.cwd(), 'credentials.json'),
         scopes: ['https://www.googleapis.com/auth/drive.readonly'],
     });
-    return googleapis_1.google.drive({ version: 'v3', auth });
+    return google.drive({ version: 'v3', auth });
 };
 // Vision API client
-const visionClient = new vision_1.default.ImageAnnotatorClient({
-    keyFilename: path_1.default.resolve(process.cwd(), 'credentials.json')
+const visionClient = new vision.ImageAnnotatorClient({
+    keyFilename: path.resolve(process.cwd(), 'credentials.json')
 });
 // GCS client
-const storage = new storage_1.Storage({
-    keyFilename: path_1.default.resolve(process.cwd(), 'credentials.json')
+const storage = new Storage({
+    keyFilename: path.resolve(process.cwd(), 'credentials.json')
 });
 // List files from Google Drive
-const listFiles = (accessToken) => __awaiter(void 0, void 0, void 0, function* () {
+export const listFiles = (accessToken) => __awaiter(void 0, void 0, void 0, function* () {
     const drive = authenticateGoogleDrive(accessToken);
     try {
         const response = yield drive.files.list({
@@ -94,17 +57,150 @@ const listFiles = (accessToken) => __awaiter(void 0, void 0, void 0, function* (
         throw error;
     }
 });
-exports.listFiles = listFiles;
-// Download and process a file from Google Drive
-const processFile = (fileId, accessToken) => __awaiter(void 0, void 0, void 0, function* () {
+const extractTextFromFile = (filePath, mimeType) => __awaiter(void 0, void 0, void 0, function* () {
     var _a;
+    let extractedText = '';
+    try {
+        console.log(`Starting text extraction for file: ${filePath} with MIME type: ${mimeType}`);
+        if (mimeType && mimeType.includes('image/')) {
+            console.log('Processing as image with Vision API');
+            // Process image using Vision API
+            const [textDetection] = yield visionClient.textDetection(filePath);
+            // Add better error handling and logging
+            if (!textDetection) {
+                console.error('No text detection response from Vision API');
+            }
+            else if (!textDetection.fullTextAnnotation) {
+                console.error('No fullTextAnnotation in Vision API response', JSON.stringify(textDetection, null, 2));
+            }
+            extractedText = ((_a = textDetection === null || textDetection === void 0 ? void 0 : textDetection.fullTextAnnotation) === null || _a === void 0 ? void 0 : _a.text) || '';
+            console.log(`Image text extraction complete. Got ${extractedText.length} characters`);
+            // Add sample of extracted text if available
+            if (extractedText.length > 0) {
+                console.log(`First 100 chars: ${extractedText.substring(0, 100)}`);
+            }
+            else {
+                console.log('No text was extracted from the image');
+            }
+        }
+        else if (mimeType === 'application/pdf') {
+            console.log('Processing as PDF - entered PDF code branch');
+            // Check if file exists and is readable
+            try {
+                const stats = fs.statSync(filePath);
+                console.log(`PDF file exists, size: ${stats.size} bytes`);
+                if (stats.size === 0) {
+                    console.error('PDF file exists but has zero size');
+                    return '';
+                }
+            }
+            catch (err) {
+                console.error('Error checking PDF file:', err);
+                return '';
+            }
+            const gcsFileName = `temp-${uuidv4()}.pdf`;
+            console.log(`Uploading to GCS bucket ${BUCKET_NAME} as ${gcsFileName}`);
+            // Check if bucket exists
+            try {
+                const [exists] = yield storage.bucket(BUCKET_NAME).exists();
+                if (!exists) {
+                    throw new Error(`Bucket ${BUCKET_NAME} does not exist`);
+                }
+                console.log(`Bucket ${BUCKET_NAME} exists and is accessible`);
+            }
+            catch (bucketError) {
+                console.error('Error checking bucket:', bucketError);
+                throw bucketError;
+            }
+            try {
+                yield storage.bucket(BUCKET_NAME).upload(filePath, {
+                    destination: gcsFileName,
+                });
+                console.log('Upload successful');
+            }
+            catch (uploadError) {
+                console.error('Error uploading to GCS:', uploadError);
+                throw uploadError;
+            }
+            try {
+                const inputConfig = {
+                    gcsSource: {
+                        uri: `gs://${BUCKET_NAME}/${gcsFileName}`,
+                    },
+                    mimeType: 'application/pdf',
+                };
+                const features = [{ type: 'DOCUMENT_TEXT_DETECTION' }];
+                const outputConfig = {
+                    gcsDestination: {
+                        uri: `gs://${BUCKET_NAME}/output-${uuidv4()}/`,
+                    },
+                };
+                const request = {
+                    requests: [
+                        {
+                            inputConfig,
+                            features,
+                            outputConfig,
+                        },
+                    ],
+                };
+                console.log('Sending PDF to Vision API for async processing');
+                const [operation] = yield visionClient.asyncBatchAnnotateFiles(request);
+                console.log('Waiting for Vision API processing to complete...');
+                const [filesResponse] = yield operation.promise();
+                console.log('Vision API processing complete');
+                // Extract text from PDF
+                const textResponses = filesResponse.responses || [];
+                if (textResponses.length > 0) {
+                    extractedText = textResponses
+                        .map((response) => { var _a; return ((_a = response.fullTextAnnotation) === null || _a === void 0 ? void 0 : _a.text) || ''; })
+                        .join('\n');
+                    console.log(`PDF text extraction complete. Got ${extractedText.length} characters`);
+                    if (extractedText.length > 0) {
+                        console.log(`First 100 chars: ${extractedText.substring(0, 100)}`);
+                    }
+                    else {
+                        console.log('No text was extracted from the PDF');
+                    }
+                }
+                else {
+                    console.log('No text responses received from Vision API');
+                }
+            }
+            catch (visionError) {
+                console.error('Error processing PDF with Vision API:', visionError);
+            }
+            // Clean up GCS file regardless of success or failure
+            try {
+                console.log(`Cleaning up temporary GCS file: ${gcsFileName}`);
+                yield storage.bucket(BUCKET_NAME).file(gcsFileName).delete();
+            }
+            catch (cleanupError) {
+                console.error('Error cleaning up GCS file:', cleanupError);
+            }
+        }
+        else {
+            console.log(`Unsupported file type: ${mimeType}`);
+        }
+        return extractedText;
+    }
+    catch (error) {
+        console.error('Error extracting text from file:', error);
+        console.error('Error details:', JSON.stringify(error, null, 2));
+        throw error;
+    }
+});
+// Process a single document from Google Drive
+export const processFile = (fileId, accessToken) => __awaiter(void 0, void 0, void 0, function* () {
     const drive = authenticateGoogleDrive(accessToken);
-    const tempDir = path_1.default.resolve(process.cwd(), 'temp');
-    if (!fs_1.default.existsSync(tempDir))
-        fs_1.default.mkdirSync(tempDir, { recursive: true });
-    const tempFilePath = path_1.default.join(tempDir, `file-${fileId}`);
+    const tempDir = path.resolve(process.cwd(), 'temp');
+    if (!fs.existsSync(tempDir))
+        fs.mkdirSync(tempDir, { recursive: true });
+    const tempFilePath = path.join(tempDir, `file-${fileId}`);
     let extractedText = '';
     let extractedData = null;
+    let documentType = 'unknown';
+    let isInStaticList = false;
     try {
         // Get file metadata
         const fileMetadata = yield drive.files.get({ fileId, fields: 'mimeType,name' });
@@ -113,8 +209,7 @@ const processFile = (fileId, accessToken) => __awaiter(void 0, void 0, void 0, f
         console.log(`Processing file "${fileName}" (ID: ${fileId}), MIME type: ${mimeType}`);
         // Download the file
         const response = yield drive.files.get({ fileId, alt: 'media' }, { responseType: 'stream' });
-        // Save the file to a temporary location
-        const dest = fs_1.default.createWriteStream(tempFilePath);
+        const dest = fs.createWriteStream(tempFilePath);
         const fileStream = response.data;
         yield new Promise((resolve, reject) => {
             fileStream
@@ -122,60 +217,14 @@ const processFile = (fileId, accessToken) => __awaiter(void 0, void 0, void 0, f
                 .on('finish', () => resolve())
                 .on('error', reject);
         });
-        // Process based on MIME type
-        if (mimeType && mimeType.includes('image/')) {
-            // Process image using Vision API
-            const [textDetection] = yield visionClient.textDetection(tempFilePath);
-            extractedText = ((_a = textDetection.fullTextAnnotation) === null || _a === void 0 ? void 0 : _a.text) || '';
-        }
-        else if (mimeType === 'application/pdf') {
-            // Upload to GCS for Vision API processing
-            const gcsFileName = `temp-${(0, uuid_1.v4)()}.pdf`;
-            yield storage.bucket(BUCKET_NAME).upload(tempFilePath, {
-                destination: gcsFileName,
-            });
-            // Process PDF with Vision API
-            // Fix for the vision API request
-            const inputConfig = {
-                gcsSource: {
-                    uri: `gs://${BUCKET_NAME}/${gcsFileName}`,
-                },
-                mimeType: 'application/pdf',
-            };
-            const features = [{ type: 'DOCUMENT_TEXT_DETECTION' }];
-            const outputConfig = {
-                gcsDestination: {
-                    uri: `gs://${BUCKET_NAME}/output-${(0, uuid_1.v4)()}/`,
-                },
-            };
-            const request = {
-                requests: [
-                    {
-                        inputConfig,
-                        features,
-                        outputConfig,
-                    },
-                ],
-            };
-            // Using the correct method signature
-            const [operation] = yield visionClient.asyncBatchAnnotateFiles(request);
-            const [filesResponse] = yield operation.promise();
-            // Extract text from PDF
-            const textResponses = filesResponse.responses || [];
-            if (textResponses.length > 0) {
-                extractedText = textResponses
-                    .map((response) => { var _a; return ((_a = response.fullTextAnnotation) === null || _a === void 0 ? void 0 : _a.text) || ''; })
-                    .join('\n');
-            }
-            // Clean up GCS file
-            yield storage.bucket(BUCKET_NAME).file(gcsFileName).delete();
-        }
-        else {
-            console.log(`Unsupported file type: ${mimeType}`);
-        }
+        // Extract text from the file
+        extractedText = yield extractTextFromFile(tempFilePath, mimeType);
+        // Now log the extracted text after it's been populated
+        console.log('Extracted text sample (first 200 chars):', extractedText.substring(0, 200));
         // Process text to extract asset information
         if (extractedText) {
-            const documentType = documentProcessor.detectDocumentType(extractedText);
+            documentType = documentProcessor.detectDocumentType(extractedText);
+            console.log('Document type detected:', documentType);
             switch (documentType) {
                 case 'bank_statement':
                     extractedData = documentProcessor.extractBankStatementData(extractedText);
@@ -191,31 +240,74 @@ const processFile = (fileId, accessToken) => __awaiter(void 0, void 0, void 0, f
                     console.log(`Unknown document type for file ${fileId}`);
                     break;
             }
+            // Check if the extracted data is in the static list
+            if (extractedData) {
+                isInStaticList = documentProcessor.isAssetInStaticList(extractedData);
+            }
         }
         // Clean up temporary file
-        if (fs_1.default.existsSync(tempFilePath))
-            fs_1.default.unlinkSync(tempFilePath);
+        if (fs.existsSync(tempFilePath))
+            fs.unlinkSync(tempFilePath);
         return {
             fileId,
-            extractedText,
+            fileName,
             extractedData,
-            documentType: extractedData ? extractedData.type : 'unknown'
+            documentType: extractedData ? extractedData.type : 'unknown',
+            isInStaticList,
+            isFinancialDocument: !!extractedData
         };
     }
     catch (error) {
-        if (fs_1.default.existsSync(tempFilePath))
-            fs_1.default.unlinkSync(tempFilePath);
-        console.error('Error processing file:', error.message);
+        if (fs.existsSync(tempFilePath))
+            fs.unlinkSync(tempFilePath);
+        console.error('Error processing document:', error.message);
         throw error;
     }
 });
-exports.processFile = processFile;
-// Compare extracted assets with static list to find missing items
-const findMissingAssets = (extractedAssets, userId) => __awaiter(void 0, void 0, void 0, function* () {
+// Main function to process all documents and save missing financial data
+export const processDriveAndSaveMissingFinancialData = (accessToken) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        // 1. List all files from Google Drive
+        const files = yield listFiles(accessToken);
+        if (!files || files.length === 0) {
+            return { processedFiles: 0, missingDataFound: 0 };
+        }
+        console.log(`Found ${files.length} files in Google Drive to process`);
+        // 2. Process each file to extract financial data
+        const results = yield Promise.all(files.map(file => processFile(file.id, accessToken)));
+        // 3. Filter for financial documents that are not in the static list
+        const missingFinancialData = results
+            .filter(result => result.isFinancialDocument && !result.isInStaticList)
+            .map(result => {
+            if (result.extractedData) {
+                return Object.assign(Object.assign({}, result.extractedData), { fileName: result.fileName, fileId: result.fileId, source: 'detected', createdAt: new Date() });
+            }
+            return null;
+        })
+            .filter(data => data !== null);
+        console.log(`Found ${missingFinancialData.length} missing financial documents`);
+        // 4. Save missing financial data to database
+        if (missingFinancialData.length > 0) {
+            const savedAssets = yield Asset.insertMany(missingFinancialData);
+            console.log(`Saved ${savedAssets.length} missing financial assets to database`);
+        }
+        return {
+            processedFiles: files.length,
+            missingDataFound: missingFinancialData.length,
+            missingData: missingFinancialData
+        };
+    }
+    catch (error) {
+        console.error('Error processing drive and saving missing financial data:', error.message);
+        throw error;
+    }
+});
+// You can keep the existing findMissingAssets function if needed
+export const findMissingAssets = (extractedAssets, userId) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         // If userId is provided, use it to filter static assets
         const query = userId ? { source: 'static', userId } : { source: 'static' };
-        const staticAssets = yield assetSchema_1.Asset.find(query);
+        const staticAssets = yield Asset.find(query);
         const staticBankNames = staticAssets
             .filter(asset => asset.type === 'bank_account')
             .map(asset => asset.name.toLowerCase());
@@ -240,4 +332,3 @@ const findMissingAssets = (extractedAssets, userId) => __awaiter(void 0, void 0,
         throw error;
     }
 });
-exports.findMissingAssets = findMissingAssets;

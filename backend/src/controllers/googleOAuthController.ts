@@ -1,179 +1,254 @@
-import { Response, Request, RequestHandler } from "express";
+import { Response, Request } from "express";
 import jwt from "jsonwebtoken";
-import { User, IUser } from "../models/userSchema";
-import { IAsset } from "../models/assetSchema";
+import { User } from "../models/userSchema.js";
 import dotenv from "dotenv";
-import { OAuth2Client } from "google-auth-library";
-import * as googleDriveService from '../services/googleDriveService';
-import { Asset } from '../models/assetSchema';
-import { Document } from "mongoose";
-import { TokenPayload } from 'google-auth-library';
+import { oauth2Client } from "../config/google.js";
+import * as googleDriveService from '../services/googleDriveService.js';
+import { Asset } from '../models/assetSchema.js';
+import { Types } from 'mongoose';
 
 dotenv.config();
 
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-
-// Process Google OAuth token and authenticate
-export const googleAuth = async (req: Request, res: Response): Promise<void> => {
-    try {
-        const { token, accessToken } = req.body;
-        
-        if (!token) {
-            res.status(400).json({ msg: "No token provided" });
-            return;
-        }
-
-        console.log(token);
-
-        // Verify Google token
-        const ticket = await googleClient.verifyIdToken({
-            idToken: token,
-            audience: process.env.GOOGLE_CLIENT_ID
-          });
-        
-        const payload = ticket.getPayload() as TokenPayload;
-
-        if (!payload || !payload.email || !payload.sub) {
-          res.status(400).json({ msg: 'Invalid token payload' });
-          return;
-        }
-
-        const { sub: googleId, email, name, picture } = payload;
-        
-        // Find or create user
-        let user = await User.findOne({ googleId });
-        
-        if (!user) {
-            // Check if a user with this email already exists
-            user = await User.findOne({ email });
-            
-            if (user) {
-                // Update existing user with Google ID
-                user.googleId = googleId;
-                user.picture = picture;
-                await user.save();
-            } else {
-                // Create new user with Google data
-                user = await User.create({
-                    googleId,
-                    email,
-                    name,
-                    picture
-                });
-            }
-        }
-        
-        const userId = (user._id as any).toString();
-        
-        // Generate JWT token
-        const jwtToken = jwt.sign({ id: userId }, process.env.JWT_SECRET as string, {
-            expiresIn: "24h"
-        });
-        
-        // Initiate asset scanning in background (don't wait for completion)
-        if (accessToken) {
-            void scanUserAssets(userId, accessToken)
-                .catch(error => console.error("Error scanning assets:", error));
-        } else {
-            console.log("No access token provided for scanning assets");
-        }
-        
-        res.status(200).json({
-            token: jwtToken,
-            user: {
-                id: userId,
-                name: user.name,
-                email: user.email,
-                picture: user.picture
-            }
-        });
-        
-    } catch (error) {
-        console.error("Google authentication error:", error);
-        res.status(500).json({ msg: "Error authenticating with Google" });
-    }
+// Generate Google OAuth URL with enhanced scopes
+export const getAuthUrl = (req: Request, res: Response): void => {
+  try {
+    const scopes = [
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/userinfo.profile',
+      'https://www.googleapis.com/auth/drive.readonly'
+    ];
+    
+    // Get current URL for redirect
+    const { host, protocol } = req.headers;
+    const redirectUri = `${protocol}://${host}/api/auth/oauth2callback`;
+    
+    const url = oauth2Client.generateAuthUrl({
+      access_type: 'offline',
+      scope: scopes,
+      prompt: 'consent',
+      redirect_uri: process.env.GOOGLE_REDIRECT_URI || redirectUri
+    });
+    
+    res.json({ url });
+  } catch (error) {
+    console.error('Error generating auth URL:', error);
+    res.status(500).json({ 
+      error: 'Failed to generate authentication URL',
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
 };
 
-const scanUserAssets = async (userId: string, accessToken: string): Promise<boolean> => {
-    try {
-        console.log(`Starting automatic asset scan for user ${userId}`);
-        
-        // Initialize static assets first
-        await initializeUserStaticAssets(userId);
-        
-        // Then scan for detected assets
-        const files = await googleDriveService.listFiles(accessToken);
-          
-        const extractedAssets: Partial<IAsset>[] = [];
-        
-        for (const file of files || []) {
-            try {
-                console.log(`Processing file: ${file.name} (ID: ${file.id})`);
-                const { extractedData } = await googleDriveService.processFile(file.id!, accessToken);
-                
-                if (extractedData && 'name' in extractedData && extractedData.name) {
-                    extractedAssets.push(extractedData);
-                }
-            } catch (error) {
-                console.error(`Error processing file ${file.id}:`, error);
-                // Continue with next file
-            }
-        }
-        
-        const missingAssets = await googleDriveService.findMissingAssets(extractedAssets, userId);
-        
-        // Save detected assets regardless of whether they're "missing" or not
-        for (const asset of extractedAssets) {
-            // Check if already exists to avoid duplicates
-            const existingAsset = await Asset.findOne({
-                name: asset.name,
-                type: asset.type,
-                userId,
-                source: 'detected'
-            });
-            
-            if (!existingAsset) {
-                const newAsset = new Asset({
-                    ...asset,
-                    userId,
-                    source: 'detected'
-                });
-                await newAsset.save();
-                console.log(`Added detected asset: ${asset.name}`);
-            }
-        }
-        
-        console.log(`Asset scan completed for user ${userId}`);
-        return true;
-    } catch (error) {
-        console.error("Error in automatic asset scanning:", error);
-        throw error;
+// Handle OAuth callback with improved error handling
+export const handleCallback = async (req: Request, res: Response): Promise<void> => {
+  const { code } = req.query;
+  
+  if (!code) {
+    console.error('Missing authorization code in callback');
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=missing-code`);
+    return;
+  }
+  
+  try {
+    const { tokens } = await oauth2Client.getToken(code as string);
+    oauth2Client.setCredentials(tokens);
+    
+    // Get user info using the access token
+    const userInfoResponse = await fetch(
+      'https://www.googleapis.com/oauth2/v2/userinfo',
+      { headers: { Authorization: `Bearer ${tokens.access_token}` } }
+    );
+    
+    if (!userInfoResponse.ok) {
+      const errorText = await userInfoResponse.text();
+      console.error("Failed to get user info:", errorText);
+      res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=invalid-token`);
+      return;
     }
+    
+    const userInfo = await userInfoResponse.json();
+    const { id: googleId, email, name, picture } = userInfo;
+    
+    if (!email) {
+      console.error("No email returned from Google");
+      res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=missing-email`);
+      return;
+    }
+    
+    // Find or create user with improved flow
+    let user = await User.findOne({ $or: [{ googleId }, { email }] });
+    
+    if (!user) {
+      // Create new user
+      try {
+        user = await User.create({
+          googleId,
+          email,
+          name,
+          picture,
+          createdAt: new Date()
+        });
+      } catch (createError) {
+        console.error("Error creating user:", createError);
+        res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=user-creation-failed`);
+        return;
+      }
+    } else if (!user.googleId) {
+      // Update existing user with googleId
+      user.googleId = googleId;
+      user.picture = picture || user.picture;
+      user.name = name || user.name;
+      await user.save();
+    } else {
+      // Update user info if needed
+      if (user.picture !== picture || user.name !== name) {
+        user.picture = picture || user.picture;
+        user.name = name || user.name;
+        await user.save();
+      }
+    }
+    
+    const userId = (user._id as any).toString();
+    
+    // Generate JWT token with additional claims
+    const jwtToken = jwt.sign({ 
+      id: userId,
+      email: user.email,
+      googleId: user.googleId,
+      iat: Math.floor(Date.now() / 1000)
+    }, process.env.JWT_SECRET as string, {
+      expiresIn: process.env.JWT_EXPIRY || "24h"
+    }as jwt.SignOptions);
+    
+    // Store tokens in database
+    user.accessToken = tokens.access_token || undefined;
+    user.refreshToken = tokens.refresh_token || user.refreshToken; // Keep existing if not provided
+    user.tokenExpiry = tokens.expiry_date 
+      ? new Date(tokens.expiry_date) 
+      : new Date(Date.now() + (3600 * 1000));
+    user.lastLogin = new Date();
+    await user.save();
+    
+    // Initiate asset scanning in background
+    if (tokens.access_token) {
+      void scanUserAssets(userId, tokens.access_token as string)
+        .catch(error => console.error("Error scanning assets:", error));
+    }
+    
+    // Redirect to frontend with token
+    const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/oauth-success?token=${jwtToken}&userId=${userId}`;
+    res.redirect(redirectUrl);
+
+  } catch (error) {
+    console.error('Error in OAuth callback:', error);
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=auth-failed`);
+  }
+};
+
+// Enhanced asset scanning that directly uses googleDriveService
+const scanUserAssets = async (userId: string, accessToken: string): Promise<boolean> => {
+  try {
+    console.log(`Starting automatic asset scan for user ${userId}`);
+      
+    // Initialize static assets first
+    await initializeUserStaticAssets(userId);
+      
+    // Use the Google Drive service to process files and extract assets
+    const { processedFiles, missingDataFound, missingData } = 
+      await googleDriveService.processDriveAndSaveMissingFinancialData(accessToken);
+    
+    // Add userId to the assets if not already set
+    if (missingData && missingData.length > 0) {
+      for (const asset of missingData) {
+        if (!asset.userId) {
+          asset.userId = new Types.ObjectId(userId);
+        }
+      }
+      
+      // Update or insert assets with userId
+      const bulkOps = missingData.map(asset => ({
+        updateOne: {
+          filter: { 
+            fileId: asset.fileId, 
+            source: 'detected' 
+          },
+          update: { ...asset, userId },
+          upsert: true
+        }
+      }));
+      
+      if (bulkOps.length > 0) {
+        await Asset.bulkWrite(bulkOps);
+      }
+    }
+    
+    // Update user record with scan results
+    const user = await User.findById(userId);
+    if (user) {
+      user.lastScanCompleted = new Date();
+      user.lastScanResults = {
+        scannedFiles: processedFiles,
+        extractedAssets: missingDataFound,
+        savedAssets: missingDataFound,
+        missingAssetsFound: missingDataFound
+      };
+      await user.save();
+    }
+    
+    console.log(`Asset scan completed for user ${userId}. Processed ${processedFiles} files, found ${missingDataFound} missing assets`);
+    return true;
+  } catch (error) {
+    console.error("Error in automatic asset scanning:", error);
+    throw error;
+  }
 };
 
 // Helper function to initialize static assets for a user
 const initializeUserStaticAssets = async (userId: string): Promise<void> => {
-    try {
-        // Check if user already has static assets
-        const existingStaticAssets = await Asset.find({ userId, source: 'static' });
+  try {
+    // Check if user already has static assets
+    const existingStaticAssets = await Asset.find({ userId, source: 'static' });
+      
+    if (existingStaticAssets.length === 0) {
+      let staticAssets = [];
+      
+      try {
+        // Try to use the config list first
+        const staticList = require('../config/staticList.json');
         
-        if (existingStaticAssets.length === 0) {
-            // Define static assets
-            const staticAssets = [
-                { name: 'HDFC Savings', type: 'bank_account', source: 'static', userId },
-                { name: 'ICICI Current', type: 'bank_account', source: 'static', userId },
-                { name: 'LIC Term Plan', type: 'insurance', source: 'static', userId },
-                { name: 'Star Health Policy', type: 'insurance', source: 'static', userId }
-            ];
-            
-            // Insert static assets
-            await Asset.insertMany(staticAssets);
-            console.log(`Initialized static assets for user ${userId}`);
-        } else {
-            console.log(`User ${userId} already has static assets`);
-        }
-    } catch (error) {
-        console.error("Error initializing static assets:", error);
-        throw error;
+        // Create assets from the static list
+        staticAssets = [
+          ...staticList.bank_accounts.map((name: string) => ({ 
+            name, 
+            type: 'bank_account', 
+            source: 'static', 
+            userId 
+          })),
+          ...staticList.insurances.map((name: string) => ({ 
+            name, 
+            type: 'insurance', 
+            source: 'static', 
+            userId 
+          }))
+        ];
+      } catch (configError) {
+        // Fall back to hardcoded list if config can't be loaded
+        staticAssets = [
+          { name: 'HDFC Savings', type: 'bank_account', source: 'static', userId },
+          { name: 'ICICI Current', type: 'bank_account', source: 'static', userId },
+          { name: 'LIC Term Plan', type: 'insurance', source: 'static', userId },
+          { name: 'Star Health Policy', type: 'insurance', source: 'static', userId }
+        ];
+      }
+      
+      // Insert static assets
+      if (staticAssets.length > 0) {
+        await Asset.insertMany(staticAssets);
+        console.log(`Initialized ${staticAssets.length} static assets for user ${userId}`);
+      }
     }
+  } catch (error) {
+    console.error(`Error initializing static assets for user ${userId}:`, error);
+    throw error;
+  }
 };

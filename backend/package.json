@@ -16,6 +16,7 @@
     "googleapis": "^148.0.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.13.2",
+    "pdf-parse": "^1.1.1",
     "postcss": "^8.5.3",
     "tailwindcss": "^4.1.3",
     "tesseract.js": "^6.0.1",
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
+    "@types/pdf-parse": "^1.1.5",
     "typescript": "^5.8.3"
   },
   "name": "vealthx-assignment",
@@ -36,5 +38,5 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs"
+  "type": "module"
 }

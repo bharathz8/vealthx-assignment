@@ -9,7 +9,9 @@ interface IAsset extends Document {
   insuredAmount?: number;
   renewalDate?: Date;
   source: 'static' | 'detected';
-  userId: mongoose.Types.ObjectId; // Add user association
+  userId: mongoose.Types.ObjectId;
+  fileId?: string;
+  fileName?: string;
   createdAt: Date;
   updatedAt: Date;
 }

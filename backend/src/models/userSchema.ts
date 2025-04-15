@@ -1,20 +1,33 @@
-import mongoose, { Document, Schema } from "mongoose";
+import mongoose, { Schema, Document } from 'mongoose';
 
-interface IUser extends Document {
-    name: string;
-    email: string;
-    googleId: string;
-    picture?: string;
+export interface IUser extends Document {
+  
+  googleId?: string;
+  email: string;
+  name?: string;
+  picture?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  tokenExpiry?: Date;
+  lastLogin?: Date;
+  lastScanCompleted?: Date;
+  lastScanResults?: {
+    scannedFiles: number;
+    extractedAssets: number;
+    savedAssets: number;
+    errors?: number;
+    missingAssetsFound: number;
+  };
 }
 
-const userSchema = new Schema<IUser>({
-    name: { type: String, required: true },
-    email: { type: String, required: true, unique: true },
-    googleId: { type: String, required: true, unique: true },
-    picture: { type: String }
-}, {
-    timestamps: true
+const userSchema = new Schema({
+  googleId: { type: String, required: true },
+  email: { type: String, required: true },
+  name: { type: String, required: true },
+  picture: { type: String },
+  refreshToken: { type: String },
+  accessToken: { type: String },
+  tokenExpiry: { type: Date },
 });
 
-const User = mongoose.model<IUser>("User", userSchema);
-export { User, IUser };
+export const User = mongoose.model<IUser>('User', userSchema);

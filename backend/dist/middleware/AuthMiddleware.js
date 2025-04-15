@@ -1,11 +1,6 @@
-"use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
-const dotenv_1 = __importDefault(require("dotenv"));
-dotenv_1.default.config();
+import jwt from "jsonwebtoken";
+import dotenv from "dotenv";
+dotenv.config();
 const authMiddleware = (req, res, next) => {
     const authHeader = req.header("Authorization");
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -14,7 +9,7 @@ const authMiddleware = (req, res, next) => {
     }
     const token = authHeader.split(" ")[1];
     try {
-        const decoded = jsonwebtoken_1.default.verify(token, process.env.JWT_SECRET);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
         req.userId = decoded.id;
         next();
     }
@@ -24,4 +19,4 @@ const authMiddleware = (req, res, next) => {
         return;
     }
 };
-exports.default = authMiddleware;
+export default authMiddleware;

@@ -1,12 +1,11 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.extractVehicleData = exports.extractInsuranceData = exports.extractBankStatementData = exports.detectDocumentType = void 0;
+import staticList from '../config/staticList.json' with { type: "json" };
 // Basic simulated document analysis using keywords
-const detectDocumentType = (text) => {
+export const detectDocumentType = (text) => {
     const lowerText = text.toLowerCase();
     if (lowerText.includes('bank statement') ||
         lowerText.includes('account statement') ||
-        lowerText.includes('transaction history')) {
+        lowerText.includes('transaction history') ||
+        lowerText.includes('bank')) {
         return 'bank_statement';
     }
     else if (lowerText.includes('insurance policy') ||
@@ -22,9 +21,8 @@ const detectDocumentType = (text) => {
     }
     return 'unknown';
 };
-exports.detectDocumentType = detectDocumentType;
 // Extract data from bank statement
-const extractBankStatementData = (text) => {
+export const extractBankStatementData = (text) => {
     // Example implementation - in a real app, this would use more sophisticated NLP/regex
     const lowerText = text.toLowerCase();
     let name = '';
@@ -56,9 +54,8 @@ const extractBankStatementData = (text) => {
         source: 'detected'
     };
 };
-exports.extractBankStatementData = extractBankStatementData;
 // Extract data from insurance policy
-const extractInsuranceData = (text) => {
+export const extractInsuranceData = (text) => {
     const lowerText = text.toLowerCase();
     let name = '';
     let policyNumber = '';
@@ -96,9 +93,8 @@ const extractInsuranceData = (text) => {
         source: 'detected'
     };
 };
-exports.extractInsuranceData = extractInsuranceData;
 // Extract data from vehicle policy
-const extractVehicleData = (text) => {
+export const extractVehicleData = (text) => {
     // Similar implementation to insurance extraction but tailored for vehicle policies
     const lowerText = text.toLowerCase();
     let name = '';
@@ -137,4 +133,19 @@ const extractVehicleData = (text) => {
         source: 'detected'
     };
 };
-exports.extractVehicleData = extractVehicleData;
+// Check if a financial asset is in the static list
+export const isAssetInStaticList = (asset) => {
+    if (!asset || !asset.type || !asset.name) {
+        return false;
+    }
+    const name = asset.name.toLowerCase();
+    switch (asset.type) {
+        case 'bank_account':
+            return staticList.bank_accounts.some((item) => name.includes(item.toLowerCase()));
+        case 'insurance':
+        case 'vehicle':
+            return staticList.insurances.some((item) => name.includes(item.toLowerCase()));
+        default:
+            return false;
+    }
+};

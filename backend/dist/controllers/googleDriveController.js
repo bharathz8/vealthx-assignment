@@ -1,37 +1,3 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -41,52 +7,161 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.scanDocuments = exports.processFile = exports.listFiles = void 0;
-const googleDriveService = __importStar(require("../services/googleDriveService"));
-const assetSchema_1 = require("../models/assetSchema");
+import * as googleDriveService from '../services/googleDriveService.js';
+import { Asset } from '../models/assetSchema.js';
+import { User } from '../models/userSchema.js';
+import { oauth2Client } from '../config/google.js';
+// Helper function to get a valid access token
+function getValidAccessToken(userId) {
+    return __awaiter(this, void 0, void 0, function* () {
+        try {
+            const user = yield User.findById(userId);
+            if (!user) {
+                throw new Error('User not found');
+            }
+            // If access token exists and not expired, use it
+            if (user.accessToken && user.tokenExpiry && new Date(user.tokenExpiry) > new Date()) {
+                return user.accessToken;
+            }
+            // If refresh token exists, use it to get a new access token
+            if (user.refreshToken) {
+                oauth2Client.setCredentials({
+                    refresh_token: user.refreshToken
+                });
+                const { credentials } = yield oauth2Client.refreshAccessToken();
+                // Update user with new tokens
+                user.accessToken = credentials.access_token || undefined;
+                user.tokenExpiry = credentials.expiry_date
+                    ? new Date(credentials.expiry_date)
+                    : new Date(Date.now() + (3600 * 1000));
+                yield user.save();
+                return credentials.access_token || null;
+            }
+            return null;
+        }
+        catch (error) {
+            console.error('Error getting valid access token:', error);
+            return null;
+        }
+    });
+}
+// Enhanced error handling for Google Drive API calls
+const handleGoogleDriveError = (error, res) => {
+    console.error("Google Drive API Error:", error);
+    // Check for common OAuth/API errors
+    if (error.response && error.response.status) {
+        switch (error.response.status) {
+            case 401:
+                res.status(401).json({
+                    message: 'Google Drive authentication error - token expired or invalid',
+                    error: error.message
+                });
+                return;
+            case 403:
+                res.status(403).json({
+                    message: 'Access denied to Google Drive. Check permissions.',
+                    error: error.message
+                });
+                return;
+            case 404:
+                res.status(404).json({
+                    message: 'Resource not found on Google Drive',
+                    error: error.message
+                });
+                return;
+            case 429:
+                res.status(429).json({
+                    message: 'Google API rate limit exceeded. Try again later.',
+                    error: error.message
+                });
+                return;
+        }
+    }
+    // Default error response
+    res.status(500).json({
+        message: 'Error processing Google Drive request',
+        error: error instanceof Error ? error.message : String(error)
+    });
+};
 // List files from Google Drive
-const listFiles = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+export const listFiles = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         console.log("Fetching files from Google Drive...");
-        const accessToken = req.header('X-Google-Token');
+        // First try to get token from header (for backward compatibility)
+        let accessToken = req.header('X-Google-Token');
+        // If no token in header, try to get from database
+        if (!accessToken && req.userId) {
+            accessToken = (yield getValidAccessToken(req.userId)) || undefined;
+        }
         if (!accessToken) {
-            res.status(400).json({ message: 'Access token required' });
+            res.status(401).json({ message: 'Valid Google access token required' });
             return;
         }
         const files = yield googleDriveService.listFiles(accessToken);
-        res.status(200).json(files);
+        res.status(200).json({
+            count: (files === null || files === void 0 ? void 0 : files.length) || 0,
+            files
+        });
     }
     catch (error) {
-        console.error("❌ Error listing files from Google Drive:", error);
-        res.status(500).json({ message: 'Error listing files', error });
+        handleGoogleDriveError(error, res);
     }
 });
-exports.listFiles = listFiles;
-// Process a single file
-const processFile = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+// Process a single file with better error reporting
+export const processFile = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { fileId } = req.params;
-        const accessToken = req.header('X-Google-Token');
+        if (!fileId) {
+            res.status(400).json({ message: 'File ID is required' });
+            return;
+        }
+        // First try to get token from header (for backward compatibility)
+        let accessToken = req.header('X-Google-Token');
+        // If no token in header, try to get from database
+        if (!accessToken && req.userId) {
+            accessToken = (yield getValidAccessToken(req.userId)) || undefined;
+        }
         if (!accessToken) {
-            res.status(400).json({ message: 'Access token required' });
+            res.status(401).json({ message: 'Valid Google access token required' });
             return;
         }
         const result = yield googleDriveService.processFile(fileId, accessToken);
+        // If the user is authenticated, save the extracted data if it's a financial document
+        if (req.userId && result.isFinancialDocument && result.extractedData) {
+            const existingAsset = yield Asset.findOne({
+                name: result.extractedData.name,
+                type: result.extractedData.type,
+                userId: req.userId,
+                source: 'detected'
+            });
+            if (!existingAsset && result.extractedData.name && result.extractedData.type) {
+                const newAsset = new Asset(Object.assign(Object.assign({}, result.extractedData), { userId: req.userId, fileId: result.fileId, fileName: result.fileName, source: 'detected', createdAt: new Date() }));
+                yield newAsset.save();
+                result.saved = true;
+            }
+            else {
+                result.saved = false;
+                result.existingAsset = existingAsset || undefined;
+            }
+        }
         res.status(200).json(result);
     }
     catch (error) {
-        res.status(500).json({ message: 'Error processing file', error });
+        handleGoogleDriveError(error, res);
     }
 });
-exports.processFile = processFile;
-// Scan documents, extract data, and find missing assets
-const scanDocuments = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+// Enhanced scan documents with progress tracking and better error management
+export const scanDocuments = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const accessToken = req.header('X-Google-Token');
+        // First try to get token from header (for backward compatibility)
+        let accessToken = req.header('X-Google-Token');
         const userId = req.userId;
+        // If no token in header, try to get from database
+        if (!accessToken && userId) {
+            accessToken = (yield getValidAccessToken(userId)) || undefined;
+        }
         if (!accessToken) {
-            res.status(400).json({ message: 'Access token required' });
+            res.status(401).json({ message: 'Valid Google access token required' });
             return;
         }
         if (!userId) {
@@ -107,7 +182,7 @@ const scanDocuments = (req, res) => __awaiter(void 0, void 0, void 0, function* 
             });
             return;
         }
-        // If token is valid, proceed with the document scan
+        // List files from Drive
         let files = [];
         try {
             files = (yield googleDriveService.listFiles(accessToken)) || [];
@@ -121,83 +196,127 @@ const scanDocuments = (req, res) => __awaiter(void 0, void 0, void 0, function* 
             });
             return;
         }
-        // Process files and extract assets
-        const extractedAssets = [];
-        const processingErrors = [];
-        for (const file of files) {
+        // Send initial response to indicate processing has started
+        res.status(202).json({
+            message: 'Document scanning started',
+            filesFound: files.length,
+            status: 'processing'
+        });
+        // Continue processing in the background
+        void (() => __awaiter(void 0, void 0, void 0, function* () {
+            var _a, _b;
+            const extractedAssets = [];
+            const processingErrors = [];
+            const savedAssets = [];
+            for (const file of files) {
+                try {
+                    console.log(`Processing file: ${file.name} (ID: ${file.id})`);
+                    const { extractedData, isFinancialDocument } = yield googleDriveService.processFile(file.id, accessToken);
+                    if (isFinancialDocument && extractedData && 'name' in extractedData && extractedData.name) {
+                        extractedAssets.push(extractedData);
+                        // Save to database if not already exists
+                        const existingAsset = yield Asset.findOne({
+                            name: extractedData.name,
+                            type: extractedData.type,
+                            userId: userId,
+                            source: 'detected'
+                        });
+                        if (!existingAsset) {
+                            const newAsset = new Asset(Object.assign(Object.assign({}, extractedData), { userId: userId, fileId: file.id, fileName: file.name, source: 'detected', createdAt: new Date() }));
+                            const savedAsset = yield newAsset.save();
+                            savedAssets.push(savedAsset);
+                        }
+                    }
+                }
+                catch (error) {
+                    console.error(`Error processing file ${file.id} (${file.name}):`, error);
+                    processingErrors.push({
+                        fileId: file.id,
+                        fileName: file.name || 'Unknown',
+                        error: error instanceof Error ? error.message : String(error)
+                    });
+                    // Continue processing other files
+                }
+            }
+            // Use the service to find missing assets
+            let missingAssets;
             try {
-                console.log(`Processing file: ${file.name} (ID: ${file.id})`);
-                const { extractedData } = yield googleDriveService.processFile(file.id, accessToken);
-                if (extractedData && 'name' in extractedData && extractedData.name) {
-                    extractedAssets.push(extractedData);
-                }
+                missingAssets = yield googleDriveService.findMissingAssets(extractedAssets, userId);
             }
-            catch (error) {
-                console.error(`Error processing file ${file.id}:`, error);
-                processingErrors.push({
-                    fileId: file.id,
-                    error: error instanceof Error ? error.message : String(error)
-                });
-                // Continue processing other files
+            catch (missingError) {
+                console.error("Error finding missing assets:", missingError);
+                missingAssets = { missing_bank_accounts: [], missing_insurances: [] };
             }
-        }
-        // Save detected assets to database
-        const savedDetectedAssets = [];
-        const saveErrors = [];
-        for (const asset of extractedAssets) {
+            // Save completion status somewhere (e.g., in user document)
             try {
-                if (!asset.name || !asset.type) {
-                    console.warn(`Skipping asset with missing required fields: ${JSON.stringify(asset)}`);
-                    continue;
-                }
-                const existingAsset = yield assetSchema_1.Asset.findOne({
-                    name: asset.name,
-                    type: asset.type,
-                    userId: userId,
-                    source: 'detected'
-                });
-                if (!existingAsset) {
-                    const newAsset = new assetSchema_1.Asset(Object.assign(Object.assign({}, asset), { userId: userId, source: 'detected' }));
-                    const savedAsset = yield newAsset.save();
-                    savedDetectedAssets.push(savedAsset);
+                const user = yield User.findById(userId);
+                if (user) {
+                    user.lastScanCompleted = new Date();
+                    user.lastScanResults = {
+                        scannedFiles: files.length,
+                        extractedAssets: extractedAssets.length,
+                        savedAssets: savedAssets.length,
+                        errors: processingErrors.length,
+                        missingAssetsFound: (((_a = missingAssets.missing_bank_accounts) === null || _a === void 0 ? void 0 : _a.length) || 0) +
+                            (((_b = missingAssets.missing_insurances) === null || _b === void 0 ? void 0 : _b.length) || 0)
+                    };
+                    yield user.save();
                 }
             }
-            catch (saveError) {
-                console.error(`Error saving asset ${asset.name}:`, saveError);
-                saveErrors.push({
-                    asset: asset.name || 'unknown',
-                    error: saveError instanceof Error ? saveError.message : String(saveError)
-                });
-                // Continue saving other assets
+            catch (updateError) {
+                console.error("Error updating user scan status:", updateError);
+                // Non-critical error, continue
             }
-        }
-        // Find missing assets
-        let missingAssets;
-        try {
-            missingAssets = yield googleDriveService.findMissingAssets(extractedAssets, userId);
-        }
-        catch (missingError) {
-            console.error("Error finding missing assets:", missingError);
-            missingAssets = { missing_bank_accounts: [], missing_insurances: [] };
-        }
-        // Send response with detailed information
-        res.status(200).json({
-            scannedFiles: files.length,
-            extractedAssets: extractedAssets.length,
-            detectedAssets: savedDetectedAssets.length,
-            missingAssets,
-            errors: {
-                processingErrors: processingErrors.length > 0 ? processingErrors : undefined,
-                saveErrors: saveErrors.length > 0 ? saveErrors : undefined
-            }
+            console.log(`Scan completed for user ${userId}. Found ${extractedAssets.length} financial assets, saved ${savedAssets.length} new assets`);
+        }))().catch(error => {
+            console.error("Background processing error:", error);
         });
     }
     catch (error) {
-        console.error("Error scanning documents:", error);
+        console.error("Error initiating document scan:", error);
         res.status(500).json({
-            message: 'Error scanning documents',
+            message: 'Error initiating document scan',
             error: error instanceof Error ? error.message : String(error)
         });
     }
 });
-exports.scanDocuments = scanDocuments;
+// Get scan status for a user
+export const getScanStatus = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        if (!req.userId) {
+            res.status(401).json({ message: 'User authentication required' });
+            return;
+        }
+        const user = yield User.findById(req.userId);
+        if (!user) {
+            res.status(404).json({ message: 'User not found' });
+            return;
+        }
+        if (!user.lastScanCompleted) {
+            res.status(200).json({
+                status: 'never_run',
+                message: 'No document scan has been completed yet'
+            });
+            return;
+        }
+        // Return scan status
+        res.status(200).json({
+            status: 'completed',
+            lastScanCompleted: user.lastScanCompleted,
+            results: user.lastScanResults || {
+                scannedFiles: 0,
+                extractedAssets: 0,
+                savedAssets: 0,
+                errors: 0,
+                missingAssetsFound: 0
+            }
+        });
+    }
+    catch (error) {
+        console.error("Error getting scan status:", error);
+        res.status(500).json({
+            message: 'Error retrieving scan status',
+            error: error instanceof Error ? error.message : String(error)
+        });
+    }
+});

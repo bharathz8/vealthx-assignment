@@ -1,4 +1,6 @@
-import { IAsset } from "../models/assetSchema";
+import { IAsset } from "../models/assetSchema.js";
+import staticList from '../config/staticList.json' with {type: "json"};
+
 
 // Document types
 type DocumentType = 'bank_statement' | 'insurance_policy' | 'vehicle_policy' | 'unknown';
@@ -10,7 +12,8 @@ export const detectDocumentType = (text: string): DocumentType => {
   if (
     lowerText.includes('bank statement') || 
     lowerText.includes('account statement') || 
-    lowerText.includes('transaction history')
+    lowerText.includes('transaction history') ||
+    lowerText.includes('bank')
   ) {
     return 'bank_statement';
   } else if (
@@ -158,4 +161,29 @@ export const extractVehicleData = (text: string): Partial<IAsset> => {
     renewalDate,
     source: 'detected'
   };
+};
+
+// Check if a financial asset is in the static list
+export const isAssetInStaticList = (asset: Partial<IAsset>): boolean => {
+  if (!asset || !asset.type || !asset.name) {
+    return false;
+  }
+
+  const name = asset.name.toLowerCase();
+  
+  switch (asset.type) {
+    case 'bank_account':
+      return staticList.bank_accounts.some((item: string) => 
+        name.includes(item.toLowerCase())
+      );
+    
+    case 'insurance':
+    case 'vehicle':
+      return staticList.insurances.some((item: string) => 
+        name.includes(item.toLowerCase())
+      );
+      
+    default:
+      return false;
+  }
 };

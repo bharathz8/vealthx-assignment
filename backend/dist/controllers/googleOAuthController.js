@@ -1,37 +1,3 @@
-"use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
     function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
     return new (P || (P = Promise))(function (resolve, reject) {
@@ -41,127 +7,176 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.googleAuth = void 0;
-const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
-const userSchema_1 = require("../models/userSchema");
-const dotenv_1 = __importDefault(require("dotenv"));
-const google_auth_library_1 = require("google-auth-library");
-const googleDriveService = __importStar(require("../services/googleDriveService"));
-const assetSchema_1 = require("../models/assetSchema");
-dotenv_1.default.config();
-const googleClient = new google_auth_library_1.OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-// Process Google OAuth token and authenticate
-const googleAuth = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+import jwt from "jsonwebtoken";
+import { User } from "../models/userSchema.js";
+import dotenv from "dotenv";
+import { oauth2Client } from "../config/google.js";
+import * as googleDriveService from '../services/googleDriveService.js';
+import { Asset } from '../models/assetSchema.js';
+import { Types } from 'mongoose';
+dotenv.config();
+// Generate Google OAuth URL with enhanced scopes
+export const getAuthUrl = (req, res) => {
     try {
-        const { token, accessToken } = req.body;
-        if (!token) {
-            res.status(400).json({ msg: "No token provided" });
-            return;
-        }
-        console.log(token);
-        // Verify Google token
-        const ticket = yield googleClient.verifyIdToken({
-            idToken: token,
-            audience: process.env.GOOGLE_CLIENT_ID
+        const scopes = [
+            'https://www.googleapis.com/auth/userinfo.email',
+            'https://www.googleapis.com/auth/userinfo.profile',
+            'https://www.googleapis.com/auth/drive.readonly'
+        ];
+        // Get current URL for redirect
+        const { host, protocol } = req.headers;
+        const redirectUri = `${protocol}://${host}/api/auth/oauth2callback`;
+        const url = oauth2Client.generateAuthUrl({
+            access_type: 'offline',
+            scope: scopes,
+            prompt: 'consent',
+            redirect_uri: process.env.GOOGLE_REDIRECT_URI || redirectUri
         });
-        const payload = ticket.getPayload();
-        if (!payload || !payload.email || !payload.sub) {
-            res.status(400).json({ msg: 'Invalid token payload' });
+        res.json({ url });
+    }
+    catch (error) {
+        console.error('Error generating auth URL:', error);
+        res.status(500).json({
+            error: 'Failed to generate authentication URL',
+            details: error instanceof Error ? error.message : String(error)
+        });
+    }
+};
+// Handle OAuth callback with improved error handling
+export const handleCallback = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const { code } = req.query;
+    if (!code) {
+        console.error('Missing authorization code in callback');
+        res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=missing-code`);
+        return;
+    }
+    try {
+        const { tokens } = yield oauth2Client.getToken(code);
+        oauth2Client.setCredentials(tokens);
+        // Get user info using the access token
+        const userInfoResponse = yield fetch('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+        if (!userInfoResponse.ok) {
+            const errorText = yield userInfoResponse.text();
+            console.error("Failed to get user info:", errorText);
+            res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=invalid-token`);
             return;
         }
-        const { sub: googleId, email, name, picture } = payload;
-        // Find or create user
-        let user = yield userSchema_1.User.findOne({ googleId });
+        const userInfo = yield userInfoResponse.json();
+        const { id: googleId, email, name, picture } = userInfo;
+        if (!email) {
+            console.error("No email returned from Google");
+            res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=missing-email`);
+            return;
+        }
+        // Find or create user with improved flow
+        let user = yield User.findOne({ $or: [{ googleId }, { email }] });
         if (!user) {
-            // Check if a user with this email already exists
-            user = yield userSchema_1.User.findOne({ email });
-            if (user) {
-                // Update existing user with Google ID
-                user.googleId = googleId;
-                user.picture = picture;
-                yield user.save();
-            }
-            else {
-                // Create new user with Google data
-                user = yield userSchema_1.User.create({
+            // Create new user
+            try {
+                user = yield User.create({
                     googleId,
                     email,
                     name,
-                    picture
+                    picture,
+                    createdAt: new Date()
                 });
+            }
+            catch (createError) {
+                console.error("Error creating user:", createError);
+                res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=user-creation-failed`);
+                return;
+            }
+        }
+        else if (!user.googleId) {
+            // Update existing user with googleId
+            user.googleId = googleId;
+            user.picture = picture || user.picture;
+            user.name = name || user.name;
+            yield user.save();
+        }
+        else {
+            // Update user info if needed
+            if (user.picture !== picture || user.name !== name) {
+                user.picture = picture || user.picture;
+                user.name = name || user.name;
+                yield user.save();
             }
         }
         const userId = user._id.toString();
-        // Generate JWT token
-        const jwtToken = jsonwebtoken_1.default.sign({ id: userId }, process.env.JWT_SECRET, {
-            expiresIn: "24h"
+        // Generate JWT token with additional claims
+        const jwtToken = jwt.sign({
+            id: userId,
+            email: user.email,
+            googleId: user.googleId,
+            iat: Math.floor(Date.now() / 1000)
+        }, process.env.JWT_SECRET, {
+            expiresIn: process.env.JWT_EXPIRY || "24h"
         });
-        // Initiate asset scanning in background (don't wait for completion)
-        if (accessToken) {
-            void scanUserAssets(userId, accessToken)
+        // Store tokens in database
+        user.accessToken = tokens.access_token || undefined;
+        user.refreshToken = tokens.refresh_token || user.refreshToken; // Keep existing if not provided
+        user.tokenExpiry = tokens.expiry_date
+            ? new Date(tokens.expiry_date)
+            : new Date(Date.now() + (3600 * 1000));
+        user.lastLogin = new Date();
+        yield user.save();
+        // Initiate asset scanning in background
+        if (tokens.access_token) {
+            void scanUserAssets(userId, tokens.access_token)
                 .catch(error => console.error("Error scanning assets:", error));
         }
-        else {
-            console.log("No access token provided for scanning assets");
-        }
-        res.status(200).json({
-            token: jwtToken,
-            user: {
-                id: userId,
-                name: user.name,
-                email: user.email,
-                picture: user.picture
-            }
-        });
+        // Redirect to frontend with token
+        const redirectUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/oauth-success?token=${jwtToken}&userId=${userId}`;
+        res.redirect(redirectUrl);
     }
     catch (error) {
-        console.error("Google authentication error:", error);
-        res.status(500).json({ msg: "Error authenticating with Google" });
+        console.error('Error in OAuth callback:', error);
+        res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?error=auth-failed`);
     }
 });
-exports.googleAuth = googleAuth;
+// Enhanced asset scanning that directly uses googleDriveService
 const scanUserAssets = (userId, accessToken) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         console.log(`Starting automatic asset scan for user ${userId}`);
         // Initialize static assets first
         yield initializeUserStaticAssets(userId);
-        // Then scan for detected assets
-        const files = yield googleDriveService.listFiles(accessToken);
-        const extractedAssets = [];
-        for (const file of files || []) {
-            try {
-                console.log(`Processing file: ${file.name} (ID: ${file.id})`);
-                const { extractedData } = yield googleDriveService.processFile(file.id, accessToken);
-                if (extractedData && 'name' in extractedData && extractedData.name) {
-                    extractedAssets.push(extractedData);
+        // Use the Google Drive service to process files and extract assets
+        const { processedFiles, missingDataFound, missingData } = yield googleDriveService.processDriveAndSaveMissingFinancialData(accessToken);
+        // Add userId to the assets if not already set
+        if (missingData && missingData.length > 0) {
+            for (const asset of missingData) {
+                if (!asset.userId) {
+                    asset.userId = new Types.ObjectId(userId);
                 }
             }
-            catch (error) {
-                console.error(`Error processing file ${file.id}:`, error);
-                // Continue with next file
+            // Update or insert assets with userId
+            const bulkOps = missingData.map(asset => ({
+                updateOne: {
+                    filter: {
+                        fileId: asset.fileId,
+                        source: 'detected'
+                    },
+                    update: Object.assign(Object.assign({}, asset), { userId }),
+                    upsert: true
+                }
+            }));
+            if (bulkOps.length > 0) {
+                yield Asset.bulkWrite(bulkOps);
             }
         }
-        const missingAssets = yield googleDriveService.findMissingAssets(extractedAssets, userId);
-        // Save detected assets regardless of whether they're "missing" or not
-        for (const asset of extractedAssets) {
-            // Check if already exists to avoid duplicates
-            const existingAsset = yield assetSchema_1.Asset.findOne({
-                name: asset.name,
-                type: asset.type,
-                userId,
-                source: 'detected'
-            });
-            if (!existingAsset) {
-                const newAsset = new assetSchema_1.Asset(Object.assign(Object.assign({}, asset), { userId, source: 'detected' }));
-                yield newAsset.save();
-                console.log(`Added detected asset: ${asset.name}`);
-            }
+        // Update user record with scan results
+        const user = yield User.findById(userId);
+        if (user) {
+            user.lastScanCompleted = new Date();
+            user.lastScanResults = {
+                scannedFiles: processedFiles,
+                extractedAssets: missingDataFound,
+                savedAssets: missingDataFound,
+                missingAssetsFound: missingDataFound
+            };
+            yield user.save();
         }
-        console.log(`Asset scan completed for user ${userId}`);
+        console.log(`Asset scan completed for user ${userId}. Processed ${processedFiles} files, found ${missingDataFound} missing assets`);
         return true;
     }
     catch (error) {
@@ -173,25 +188,46 @@ const scanUserAssets = (userId, accessToken) => __awaiter(void 0, void 0, void 0
 const initializeUserStaticAssets = (userId) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         // Check if user already has static assets
-        const existingStaticAssets = yield assetSchema_1.Asset.find({ userId, source: 'static' });
+        const existingStaticAssets = yield Asset.find({ userId, source: 'static' });
         if (existingStaticAssets.length === 0) {
-            // Define static assets
-            const staticAssets = [
-                { name: 'HDFC Savings', type: 'bank_account', source: 'static', userId },
-                { name: 'ICICI Current', type: 'bank_account', source: 'static', userId },
-                { name: 'LIC Term Plan', type: 'insurance', source: 'static', userId },
-                { name: 'Star Health Policy', type: 'insurance', source: 'static', userId }
-            ];
+            let staticAssets = [];
+            try {
+                // Try to use the config list first
+                const staticList = require('../config/staticList.json');
+                // Create assets from the static list
+                staticAssets = [
+                    ...staticList.bank_accounts.map((name) => ({
+                        name,
+                        type: 'bank_account',
+                        source: 'static',
+                        userId
+                    })),
+                    ...staticList.insurances.map((name) => ({
+                        name,
+                        type: 'insurance',
+                        source: 'static',
+                        userId
+                    }))
+                ];
+            }
+            catch (configError) {
+                // Fall back to hardcoded list if config can't be loaded
+                staticAssets = [
+                    { name: 'HDFC Savings', type: 'bank_account', source: 'static', userId },
+                    { name: 'ICICI Current', type: 'bank_account', source: 'static', userId },
+                    { name: 'LIC Term Plan', type: 'insurance', source: 'static', userId },
+                    { name: 'Star Health Policy', type: 'insurance', source: 'static', userId }
+                ];
+            }
             // Insert static assets
-            yield assetSchema_1.Asset.insertMany(staticAssets);
-            console.log(`Initialized static assets for user ${userId}`);
-        }
-        else {
-            console.log(`User ${userId} already has static assets`);
+            if (staticAssets.length > 0) {
+                yield Asset.insertMany(staticAssets);
+                console.log(`Initialized ${staticAssets.length} static assets for user ${userId}`);
+            }
         }
     }
     catch (error) {
-        console.error("Error initializing static assets:", error);
+        console.error(`Error initializing static assets for user ${userId}:`, error);
         throw error;
     }
 });
